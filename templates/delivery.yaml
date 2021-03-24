@@ -1,0 +1,592 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: stack template
+Parameters:
+  GitHubRepoName:
+    Type: String
+  GitHubOwner:
+    Type: String
+    Default: lifull
+  GitHubBranch:
+    Type: String
+  GitHubToken:
+    Type: String
+    NoEcho: true
+  SlackWorkspaceId:
+    Type: String
+    NoEcho: true
+  SlackChannelId:
+    Type: String
+    NoEcho: true
+  ECRRepositoryName:
+    Type: String
+    Default: ''
+    Description: If you already have a repository, you can specify it
+  Stage:
+    Type: String
+  CacheVersion:
+    Type: String
+    Description: unique identifier for using by cache key of CodeBuild
+    Default: 1
+  CodeBuildComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_SMALL
+  CodeBuildImageName:
+    Type: String
+    Default: aws/codebuild/standard:4.0
+  TargetBucketExposedStackName:
+    Type: String
+    Default: V1ClusterBootstrap
+  TargetBucketExposedName:
+    Type: String
+    Default: WebhookBucket
+  DockerBuildExOpts:
+    Type: String
+    Default: ""
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+  SubnetIds:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+Conditions:
+  CreateECRRepository: !Equals [ !Ref ECRRepositoryName, '' ]
+Resources:
+  AlertTopic:
+    Type: 'AWS::SNS::Topic'
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Condition: CreateECRRepository
+    DeletionPolicy: Retain
+    Properties:
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules":[
+              {
+                "rulePriority":1,
+                "description":"Delete old images",
+                "selection":{
+                  "tagStatus":"untagged",
+                  "countType":"imageCountMoreThan",
+                  "countNumber":30
+                },
+                "action":{"type":"expire"}
+              },{
+                "rulePriority":2,
+                "description":"Delete old current images",
+                "selection":{
+                  "tagStatus":"tagged",
+                  "tagPrefixList":["current-"],
+                  "countType":"imageCountMoreThan",
+                  "countNumber":10
+                },
+                "action":{"type":"expire"}
+              },{
+                "rulePriority":3,
+                "description":"Delete old pr images",
+                "selection":{
+                  "tagStatus":"tagged",
+                  "tagPrefixList":["pr-"],
+                  "countType":"sinceImagePushed",
+                  "countNumber":7,
+                  "countUnit":"days"
+                },
+                "action":{"type":"expire"}
+              },{
+                "rulePriority":4,
+                "description":"Delete old pool images",
+                "selection":{
+                  "tagStatus":"tagged",
+                  "tagPrefixList":["pool-"],
+                  "countType":"imageCountMoreThan",
+                  "countNumber":10
+                },
+                "action":{"type":"expire"}
+              },{
+                "rulePriority":5,
+                "description":"Delete old live images",
+                "selection":{
+                  "tagStatus":"tagged",
+                  "tagPrefixList":["live-"],
+                  "countType":"imageCountMoreThan",
+                  "countNumber":10
+                },
+                "action":{"type":"expire"}
+              }
+            ]
+          }
+      # Repository name must start with a letter and can only contain lowercase letters, numbers, hyphens, underscores, and forward slashes
+      RepositoryName: !Ref GitHubRepoName
+  ArtifactStoreBucket:
+    Type: 'AWS::S3::Bucket'
+  DeployPipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      ArtifactStore:
+        Location: !Ref ArtifactStoreBucket
+        Type: S3
+      RestartExecutionOnUpdate: false
+      RoleArn: !GetAtt PipelineServiceRole.Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: SourceAction
+          ActionTypeId:
+            Category: Source
+            Owner: ThirdParty
+            Version: '1'
+            Provider: GitHub
+          OutputArtifacts:
+          - Name: SourceOutput
+          Configuration:
+            Owner: !Ref GitHubOwner
+            Repo: !Ref GitHubRepoName
+            Branch: !Ref GitHubBranch
+            OAuthToken: !Ref GitHubToken
+            PollForSourceChanges: "true"
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: SourceOutput
+          OutputArtifacts:
+          - Name: BuildOutput
+          Configuration:
+            ProjectName: !Ref Build
+          RunOrder: 1
+  # CodePipelineの実行に必要な権限
+  PipelineServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Principal:
+            Service: "codepipeline.amazonaws.com"
+          Action: "sts:AssumeRole"
+      Path: /service-role/
+      Policies:
+      # 付与の方針：読み込み系は基本許可、書き込み系は最低限のみ
+      - PolicyName: PipelinePolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Resource:
+            - "*"
+            Action:
+            - "iam:PassRole"
+            - "iam:GetRole"
+          - Effect: "Allow"
+            Resource:
+            - "*"
+            Action:
+            - "s3:Get*"
+            - "s3:List*"
+          - Effect: "Allow"
+            Resource:
+            - !Sub "arn:aws:s3:::${ArtifactStoreBucket}/*"
+            Action:
+            - "s3:PutObject"
+          - Effect: "Allow"
+            Resource:
+            - "*"
+            Action:
+            - "codebuild:BatchGet*"
+            - "codebuild:Get*"
+            - "codebuild:List*"
+          - Effect: "Allow"
+            Resource:
+            - !GetAtt Build.Arn
+            Action:
+            - "codebuild:StartBuild"
+  SSMSecureStringKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${GitHubRepoName}-${Stage}-delivery"
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: "allow-from-codebuild"
+        Statement:
+        - Sid: "1"
+          Effect: Allow
+          Principal:
+            AWS:
+            - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+          Action: "kms:*"
+          Resource: '*'
+        - Sid: "2"
+          Effect: Allow
+          Principal:
+            AWS: !GetAtt BuildServiceRole.Arn
+          Action:
+          - "kms:*"
+          Resource: '*'
+  SSMSecureStringKeyID:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${GitHubRepoName}-${Stage}-delivery"
+      TargetKeyId: !Ref SSMSecureStringKey
+  SecretStore:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub "${GitHubRepoName}-${Stage}-delivery"
+      SecretString: !Sub
+      - |
+        {
+          "GitHubToken": "${GitHubToken}",
+          "AWS_ACCESS_KEY_ID": "${ApplicationUserAccessKeyID}",
+          "AWS_SECRET_ACCESS_KEY": "${ApplicationUserSecretAccessKey}"
+        }
+      - GitHubToken: !Ref GitHubToken
+        ApplicationUserAccessKeyID: !Ref ApplicationUserKey
+        ApplicationUserSecretAccessKey: !GetAtt ApplicationUserKey.SecretAccessKey
+      KmsKeyId: !Ref SSMSecureStringKey
+  ApplicationUser:
+    Type: AWS::IAM::User
+    Properties:
+      Path: "/"
+      Policies: [ ]
+  ApplicationUserKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref ApplicationUser
+  Build:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole: !GetAtt BuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |-
+          version: 0.2
+          env:
+            variables: {}
+          phases:
+            install:
+              commands:
+                - export PATH=/tmp/cache/bin:$PATH
+                - mkdir -p /opt/v1clusterbootstrap
+                - cd /opt/v1clusterbootstrap
+                - git init
+                - git remote add origin https://${GITHUB_TOKEN}@github.com/lifull/v1clusterbootstrap.git
+                - git fetch origin
+                - git config core.sparsecheckout true
+                - echo "bin/manifest-builder" >> .git/info/sparse-checkout
+                - echo "templates" >> .git/info/sparse-checkout
+                - echo "delivery_scripts" >> .git/info/sparse-checkout
+                - branch=master
+                - if [ "$STAGE" = "current" ]; then branch=develop; fi
+                - git branch ${branch} refs/remotes/origin/${branch}
+                - git symbolic-ref HEAD refs/heads/${branch}
+                - git read-tree -m -u HEAD
+                - chmod 755 delivery_scripts/*
+                - mkdir -p /tmp/cache/bin
+                - export SKIP_MANIFEST_VALIDATION=0
+                - export KUSTOMIZE_VERSION=2.0.3
+                - export RUBY_VERSION=2.5.7
+                - delivery_scripts/dedupe_build_hash.sh ruby $RUBY_VERSION || (git clone https://github.com/rbenv/ruby-build.git /opt/ruby-build && /opt/ruby-build/bin/ruby-build $RUBY_VERSION /tmp/cache && rm -rf /opt/ruby-build && delivery_scripts/save_build_hash.sh ruby $RUBY_VERSION)
+                - cd $CODEBUILD_SRC_DIR
+                # CodePipeline does not support submodule(and assume-role)
+                - /opt/v1clusterbootstrap/delivery_scripts/clone_with_submodules.sh
+                - cd ${CODEBUILD_SRC_DIR}/${GITHUB_REPO_NAME}
+            pre_build:
+              commands:
+                - /opt/v1clusterbootstrap/delivery_scripts/create_revision_file.sh $CODEBUILD_RESOLVED_SOURCE_VERSION
+            build:
+              commands:
+                - export APPLICATION_NAME=$GITHUB_REPO_NAME
+                - export REPOSITORY_ROOT_PATH=$CODEBUILD_SRC_DIR
+                - export DOCKER_BUILDKIT=1
+                - export DOCKER_BUILD_EX_OPTS="$DOCKER_BUILD_EX_OPTS --build-arg BUILDKIT_INLINE_CACHE=1"
+                - /opt/v1clusterbootstrap/delivery_scripts/build_image.sh Dockerfile $STAGE ${STAGE}-${CODEBUILD_RESOLVED_SOURCE_VERSION}
+                - cd ${CODEBUILD_SRC_DIR}/${GITHUB_REPO_NAME}/manifests
+                - echo -n $APPLICATION_AWS_ACCESS_KEY_ID > base/AWS_ACCESS_KEY_ID
+                - echo -n $APPLICATION_AWS_SECRET_ACCESS_KEY > base/AWS_SECRET_ACCESS_KEY
+                - if [ "$STAGE" = "current" ]; then /opt/v1clusterbootstrap/delivery_scripts/build_manifest.sh current build-${CODEBUILD_RESOLVED_SOURCE_VERSION}; fi
+                - if [ "$STAGE" = "preview" ]; then /opt/v1clusterbootstrap/delivery_scripts/build_manifest.sh preview build-${CODEBUILD_RESOLVED_SOURCE_VERSION}; fi
+                - if [ "$STAGE" = "production" ]; then /opt/v1clusterbootstrap/delivery_scripts/build_manifest.sh production build-${CODEBUILD_RESOLVED_SOURCE_VERSION}; fi
+          cache:
+            paths:
+              - '/tmp/cache/**/*'
+      Environment:
+        ComputeType: !Ref CodeBuildComputeType
+        Image: !Ref CodeBuildImageName
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: STAGE
+          Value: !Ref Stage
+        - Name: GITHUB_REPO_NAME
+          Value: !Ref GitHubRepoName
+        - Name: GITHUB_OWNER
+          Value: !Ref GitHubOwner
+        - Name: GITHUB_BRANCH
+          Value: !Ref GitHubBranch
+        - Name: GITHUB_TOKEN
+          Type: SECRETS_MANAGER
+          Value: !Sub "${SecretStore}:GitHubToken::"
+        - Name: ECR_REPOSITORY_PATH
+          Value:
+            !If
+          - CreateECRRepository
+          - !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}"
+          - !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}"
+        - Name: TARGET_BUCKET_EXPOSED_STACK_NAME
+          Value: !Ref TargetBucketExposedStackName
+        - Name: TARGET_BUCKET_EXPOSED_NAME
+          Value: !Ref TargetBucketExposedName
+        - Name: AWS_REGION
+          Value: !Ref AWS::Region
+        - Name: CACHE_VERSION
+          Value: !Ref CacheVersion
+        - Name: DOCKER_BUILD_EX_OPTS
+          Value: !Ref DockerBuildExOpts
+        - Name: APPLICATION_AWS_ACCESS_KEY_ID
+          Type: SECRETS_MANAGER
+          Value: !Sub "${SecretStore}:AWS_ACCESS_KEY_ID::"
+        - Name: APPLICATION_AWS_SECRET_ACCESS_KEY
+          Type: SECRETS_MANAGER
+          Value: !Sub "${SecretStore}:AWS_SECRET_ACCESS_KEY::"
+      Cache:
+        Location: !Sub "${ArtifactStoreBucket}/Cache"
+        Type: S3
+      # Avoid docker hub rate limit. In non-vpc env, a common IP range is set up in aws for each region.
+      # It aim to mitigate limiting by make a request from nat-gw in the vpc.
+      VpcConfig:
+        SecurityGroupIds:
+        - !GetAtt CodeBuildSecurityGroup.GroupId
+        Subnets: !Ref SubnetIds
+        VpcId: !Ref VpcId
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for CodeBuildSecurityGroup"
+      VpcId: !Ref VpcId
+  CodePipelineFailedEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+        - "aws.codepipeline"
+        resources:
+        - !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DeployPipeline}"
+        detail-type:
+        - "CodePipeline Stage Execution State Change"
+        detail:
+          state:
+          - "FAILED"
+      Targets:
+      - Id: AlertTopic
+        Arn: !Ref AlertTopic
+  # AWS ChatBot does not support CloudWatch Events
+  PipelineFailedAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmName: !Sub "${AWS::StackName}-Pipeline-Failed"
+      AlarmActions:
+      - !Ref AlertTopic
+      - !ImportValue V1ClusterBootstrap:OperationTopic
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      Dimensions:
+      - Name: "RuleName"
+        Value: !Ref CodePipelineFailedEvents
+      EvaluationPeriods: 1
+      MetricName: "TriggeredRules"
+      Namespace: "AWS/Events"
+      Period: 60
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: "notBreaching"
+  BuildDurationAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmName: !Sub "${AWS::StackName}-Build-Duration"
+      AlarmActions:
+      - !Ref AlertTopic
+      - !ImportValue V1ClusterBootstrap:OperationTopic
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      Dimensions:
+      - Name: "ProjectName"
+        Value: !Ref Build
+      EvaluationPeriods: 1
+      MetricName: "Duration"
+      Namespace: "AWS/CodeBuild"
+      Period: 60
+      Statistic: Sum
+      Threshold: 900.0
+      TreatMissingData: "notBreaching"
+  BuildLogs:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${Build}"
+      RetentionInDays: 7
+  # CodePipeline経由で呼び出されるサービスロール
+  BuildServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Principal:
+            Service: "codebuild.amazonaws.com"
+          Action: "sts:AssumeRole"
+      Path: /service-role/
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
+      - !ImportValue "V1ClusterBootstrap:ExternalSecretAccessPolicy"
+      Policies:
+      - PolicyName: "deploy-to-ecr"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action: "ecr:*"
+            Resource:
+            - !If
+              - CreateECRRepository
+              - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepository}"
+              - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepositoryName}"
+      - PolicyName: "deploy-to-s3"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action: "s3:*"
+            Resource:
+            - "arn:aws:s3:::v1clusterbootstrap-webhookbucket*"
+            - "arn:aws:s3:::v1clusterbootstrap-webhookbucket*/*"
+      - PolicyName: "assume-role"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Resource:
+            - "*"
+      - PolicyName: fetch-secrets
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+            - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:SecretStore-*"
+      - PolicyName: "decrypt-secure-string"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - "kms:Describe*"
+            - "kms:List*"
+            - "kms:Get*"
+            # 循環参照になってしまうため、KMS側で適切に権限が絞られているという前提のもと全てのリソースに対して許可
+            Resource:
+            - "*"
+      - PolicyName: "run-on-vpc"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - 'ec2:CreateNetworkInterface'
+            - 'ec2:DescribeDhcpOptions'
+            - 'ec2:DescribeNetworkInterfaces'
+            - 'ec2:DeleteNetworkInterface'
+            - 'ec2:DescribeSubnets'
+            - 'ec2:DescribeSecurityGroups'
+            - 'ec2:DescribeVpcs'
+            Resource:
+            - "*"
+          - Effect: "Allow"
+            Action:
+            - 'ec2:CreateNetworkInterfacePermission'
+            Resource:
+            - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+            Condition:
+              StringEquals:
+                "ec2:AuthorizedService": "codebuild.amazonaws.com"
+  BuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: BuildPolicy
+      Roles:
+      - !Ref BuildServiceRole
+      PolicyDocument:
+        # 付与の方針：読み込み系は基本許可、書き込み系は最低限のみ
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Resource:
+          - "*"
+          Action:
+          - "logs:Describe*"
+          - "logs:Get*"
+          - "logs:TestMetricFilter"
+          - "logs:FilterLogEvents"
+        - Effect: Allow
+          Resource:
+          - !Sub "${BuildLogs.Arn}:*"
+          Action:
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+        - Effect: "Allow"
+          Resource:
+          - "*"
+          Action:
+          - "s3:Get*"
+          - "s3:List*"
+        - Effect: Allow
+          Resource:
+          - !Sub "arn:aws:s3:::${ArtifactStoreBucket}/*"
+          Action:
+          - s3:PutObject
+  Chatbot:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      ConfigurationName: !Ref GitHubRepoName
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      LoggingLevel: NONE
+      SlackChannelId: !Ref SlackChannelId
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SnsTopicArns:
+      - !Ref AlertTopic
+  ChatbotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Principal:
+            Service: "chatbot.amazonaws.com"
+          Action: "sts:AssumeRole"
+      Path: /service-role/
+      Policies:
+      - PolicyName: ChatbotPolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Resource:
+            - "*"
+            Action:
+            - "cloudwatch:Describe*"
+            - "cloudwatch:Get*"
+            - "cloudwatch:List*"
+Outputs:
+  AlertTopic:
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}:AlertTopic"

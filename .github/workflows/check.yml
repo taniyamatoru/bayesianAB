@@ -1,0 +1,55 @@
+name: check
+on:
+  push:
+    paths:
+    - 'tests/**'
+    - 'src/**'
+    - '.github/**'
+    - 'mypy.ini'
+    - 'pyproject.toml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Set up Python
+      uses: actions/setup-python@v1
+      with:
+        python-version: 3.9.2
+
+    - name: Install poetry and dependencies
+      run: |
+        python -m pip install -U pip
+        pip install poetry
+        poetry install
+
+    - name: Check isort
+      run: |
+        poetry run isort src tests
+
+    - name: Check flake8
+      run: |
+        poetry run flake8
+
+    - name: Check mypy
+      run: |
+        poetry run mypy src
+
+    - name: Run pytest
+      run: |
+        poetry run pytest
+
+    # codeclimateのテストカバレッジを使う時は以下のコメントアウトを外し、CC_TEST_REPORTER_IDを書き換える。その場合上記のRun pytestは不要
+    # - name: Define branchname
+    #   run: |
+    #     echo "GIT_BRANCH=$(echo '${{ toJSON(github) }}' | jq -r ".ref[11:]")" >> $GITHUB_ENV
+    # - name: Run pytest coverage and upload to codeclimate
+    #   env:
+    #     CC_TEST_REPORTER_ID: [codeclimate reporter id (e.g. c42dbb46190bb5b8829da73b9d0f820118b676f326a31d0b8b18d9fdad1cab1f)]
+    #   run: |
+    #     poetry run pytest --cov=${GITHUB_WORKSPACE}/src --cov-report xml
+    #     curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > ./cc-test-reporter
+    #     chmod +x ./cc-test-reporter
+    #     ./cc-test-reporter format-coverage -t coverage.py ./coverage.xml
+    #     ./cc-test-reporter upload-coverage -d

@@ -1,0 +1,55 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v3.2.0
+    hooks:
+      - id: trailing-whitespace
+        always_run: true
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+        always_run: true
+      - id: check-yaml
+        exclude: templates/.*\.(json|yml|yaml)$
+        always_run: true
+        args: [--allow-multiple-documents]
+      - id: check-json
+        always_run: true
+      - id: check-added-large-files
+        always_run: true
+
+  # cloud formation files
+  # templatesディレクトリ配下を想定
+  - repo: https://github.com/awslabs/cfn-python-lint
+    rev: v0.42.0
+    hooks:
+      - id: cfn-python-lint
+        files: templates/.*\.(json|yml|yaml)$
+        args: [--ignore-checks=W]
+
+  # sort imports
+  - repo: local
+    hooks:
+      - id: isort
+        name: isort
+        entry: poetry run isort src
+        language: system
+        types: [file, python]
+
+  # auto lint
+  - repo: local
+    hooks:
+      - id: black
+        name: black
+        entry: poetry run black .
+        language: system
+        types: [file, python]
+
+  # check lint
+  - repo: local
+    hooks:
+      - id: flake8
+        name: flake8
+        entry: poetry run flake8 src
+        language: system
+        types: [python]

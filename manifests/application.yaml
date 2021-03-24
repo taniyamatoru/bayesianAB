@@ -1,0 +1,230 @@
+# アプリケーション名
+# `{{ .Values.uniqueIdentifier }}` は helm のテンプレートリテラルで uniqueIdentifier は V1ClusterBootstrap から提供される様々な機能のために付与している
+# manifest-builder 管理外の全てのリソース名に同じように付与すること
+# なお59文字を超えてはならない
+name: keel-application-template{{  .Values.uniqueIdentifier  }}
+port: 80 # リクエストを受け付ける Port
+
+owner: keel@lifull.com # アプリケーションの所有者
+
+# Readiness Probe が success するとコンテナがリクエストを受け付け始める
+readiness_probe_enabled: true # readiness probe を有効かするか否か
+readiness_healthcheck_path: / # readiness_probe_enabled が true の時の healthcheck に使う path
+readiness_initial_delay: 30 # readiness probe が有効になるまでの秒数
+readiness_period_seconds: 1 # readiness probe を実行する間隔
+readiness_timeout: 1 # readiness probe がタイムアウトするまでの秒数
+readiness_success_threshold: 1 # readiness probe が成功するまでの回数
+readiness_failure_threshold: 3 # readiness probe が失敗するまでの回数
+
+# Liveness Probe が fail するとコンテナが再起動する
+liveness_probe_enabled: false # liveness probe を有効かするか否か
+liveness_healthcheck_path: / # liveness_probe_enabled が true の時の healthcheck に使う path
+liveness_initial_delay: 60 # liveness probe が有効になるまでの秒数
+liveness_period_seconds: 1 # liveness probe を実行する間隔
+liveness_timeout: 1 # liveness probe がタイムアウトするまでの秒数
+liveness_success_threshold: 1 # liveness probe が成功するまでの回数
+liveness_failure_threshold: 10 # liveness probe が失敗するまでの回数
+
+timeout: 30s # この Service のタイムアウト期間 e.g. 10s, 1m, 1h
+retry_count: 2 # この Service への自動リトライ回数 retry_countとretry_timeoutを削除すると無効化
+retry_timeout: 10s # リトライまでのタイムアウト期間 e.g. 10s, 1m, 1h retry_countとretry_timeoutを削除すると無効化
+
+pre_stop_sleep: 3 # コンテナ停止時の SIGTERM が送られるまでの秒数
+termination_grace_period: 30 # コンテナ停止時の SIGKILL が送られるまでの猶予秒数
+progress_deadline_seconds: 1200 # deployment更新処理失敗判定までの待機秒数
+
+current:
+  namespace: sample-current # デプロイしたい Namespace 名
+  image: "692179382872.dkr.ecr.ap-northeast-1.amazonaws.com/keel-application-template{{  if  .Values.imageTag  }}:{{  .Values.imageTag  }}{{  end  }}" # 起動する Docker Image
+  command: # Docker Image で実行するコマンド
+    - /usr/local/bin/main
+  args: # Docker Image で実行するコマンドに渡す引数
+    - server
+  sidecar_enabled: true # istio のサイドカーをデプロイするかどうか
+  accesslog_enabled: true # istio のサイドカーをデプロイしている時にアクセスロギングをするかどうか
+
+  labels:
+  annotations:
+
+  max_replicas: 3 # 最大 Pod 数
+  min_replicas: 1 # 最小 Pod 数
+  replicas: 2 # 初期 Pod 数
+  max_surge: 1 # Rolling Update 時に追加で起動する Pod 数
+  max_unavailable: 1 # Rolling Update 時に停止する Pod 数
+
+  cpu_limit: "100m" # CPU 上限 1000m は 1 秒間 1 コアを占有することを意味する
+  memory_limit: "256Mi" # メモリ上限
+  cpu_request: "10m" # CPU 確保量 1000m は 1 秒間 1 コアを占有することを意味する
+  memory_request: "64Mi" # メモリ確保量
+
+  # スケールの閾値となるCPU使用率
+  # 実際の使用量を `cpu_request` で確保したCPUで割った値が参照される
+  cpu_threshold: 200
+
+  hosts: # クラスタ外部からリクエストを受け付けるホスト名
+    - keel-application-template{{  .Values.uniqueIdentifier  }}.k8s.dev.nxin.jp
+
+  # istio 経由でクラスタ外に公開するか否か
+  # あらかじめ host を istio-ingressgateway 用の LoadBalancer を CNAME として名前解決できるようにしておく必要がある
+  # クラスタ外からのトラフィックにおいて istio の機能を利用したい場合はこちらを有効にする
+  istio_exposed: true
+
+  # 追加で設定するルーティングルール
+  # 与えたルールはIstioのVirtualServiceに追加される cf. https://istio.io/latest/docs/reference/config/networking/virtual-service/
+  # ルーティングルールは上に行くほど優先度が高く、追加されたルールはデフォルトのルーティングルールの上に挿入される
+  additional_rules:
+    - match: # このルールは/healthと/metricsに対しての外部からのリクエストを404で返す
+        - uri:
+            exact: /health
+        - uri:
+            exact: /metrics
+      fault:
+        abort:
+          httpStatus: 404
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: WRITE_HOST_HERE
+            port:
+              number: 80
+
+  destinations: # リクエストすることを許可する接続先の情報
+
+  max_connections: 100 # リクエストを遮断するバックエンドへの最大同時TCPコネクション数 この行を削除することで無効化
+  max_requests: 1000 # リクエストを遮断するバックエンドへの最大同時リクエスト数 この行を削除することで無効化
+  tcp_connect_timeout: 3s # TCP接続が確立するまでのタイムアウト期間 e.g. 10s, 1m, 1h
+  consecutive_gateway_errors: 50 # リクエストを遮断するバックエンドからの連続 502,503,504 レスポンス数 この行を削除することで無効化
+  sleep_window: 10s # リクエスト遮断のための計測期間 e.g. 10s, 1m, 1h
+  max_ejection_percent: 50 # リクエストを遮断するホストの割合 envoy の healthy_panic_threshold(Default: 50) を超えるホストが遮断されている場合ランダムなホストにリクエストされる
+  base_ejection_time: 5s # リクエスト遮断時間 e.g. 10s, 1m, 1h
+
+preview:
+  namespace: sample-preview # デプロイしたい Namespace 名
+  image: "919724784271.dkr.ecr.ap-northeast-1.amazonaws.com/keel-application-template{{  if  .Values.imageTag  }}:{{  .Values.imageTag  }}{{  end  }}" # 起動する Docker Image
+  command: # Docker Image で実行するコマンド
+    - /usr/local/bin/main
+  args: # Docker Image で実行するコマンドに渡す引数
+    - server
+  sidecar_enabled: true # istio のサイドカーをデプロイするかどうか
+
+  labels:
+  annotations:
+
+  max_replicas: 3 # 最大 Pod 数
+  min_replicas: 1 # 最小 Pod 数
+  replicas: 2 # 初期 Pod 数
+  max_surge: 1 # Rolling Update 時に追加で起動する Pod 数
+  max_unavailable: 1 # Rolling Update 時に停止する Pod 数
+
+  cpu_limit: "100m" # CPU 上限 1000m は 1 秒間 1 コアを占有することを意味する
+  memory_limit: "256Mi" # メモリ上限
+  cpu_request: "10m" # CPU 確保量 1000m は 1 秒間 1 コアを占有することを意味する
+  memory_request: "64Mi" # メモリ確保量
+
+  # スケールの閾値となるCPU使用率
+  # 実際の使用量を `cpu_request` で確保したCPUで割った値が参照される
+  cpu_threshold: 200
+
+  hosts: # クラスタ外部からリクエストを受け付けるホスト名
+    - keel-application-template{{  .Values.uniqueIdentifier  }}.k8s.nxin.jp
+
+  # istio 経由でクラスタ外に公開するか否か
+  # あらかじめ host を istio-ingressgateway 用の LoadBalancer を CNAME として名前解決できるようにしておく必要がある
+  # クラスタ外からのトラフィックにおいて istio の機能を利用したい場合はこちらを有効にする
+  istio_exposed: true
+
+  # 追加で設定するルーティングルール
+  # 与えたルールはIstioのVirtualServiceに追加される cf. https://istio.io/latest/docs/reference/config/networking/virtual-service/
+  # ルーティングルールは上に行くほど優先度が高く、追加されたルールはデフォルトのルーティングルールの上に挿入される
+  additional_rules:
+    - match: # このルールは/healthと/metricsに対しての外部からのリクエストを404で返す
+        - uri:
+            exact: /health
+        - uri:
+            exact: /metrics
+      fault:
+        abort:
+          httpStatus: 404
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: WRITE_HOST_HERE
+            port:
+              number: 80
+
+  destinations: # リクエストすることを許可する接続先の情報
+
+  max_connections: 100 # リクエストを遮断するバックエンドへの最大同時TCPコネクション数 この行を削除することで無効化
+  max_requests: 1000 # リクエストを遮断するバックエンドへの最大同時リクエスト数 この行を削除することで無効化
+  tcp_connect_timeout: 3s # TCP接続が確立するまでのタイムアウト期間 e.g. 10s, 1m, 1h
+  consecutive_gateway_errors: 50 # リクエストを遮断するバックエンドからの連続 502,503,504 レスポンス数 この行を削除することで無効化
+  sleep_window: 10s # リクエスト遮断のための計測期間 e.g. 10s, 1m, 1h
+  max_ejection_percent: 50 # リクエストを遮断するホストの割合 envoy の healthy_panic_threshold(Default: 50) を超えるホストが遮断されている場合ランダムなホストにリクエストされる
+  base_ejection_time: 5s # リクエスト遮断時間 e.g. 10s, 1m, 1h
+
+production:
+  namespace: sample # デプロイしたい Namespace 名
+  image: 919724784271.dkr.ecr.ap-northeast-1.amazonaws.com/keel-application-template # 起動する Docker Image
+  command: # Docker Image で実行するコマンド
+    - /usr/local/bin/main
+  args: # Docker Image で実行するコマンドに渡す引数
+    - server
+  sidecar_enabled: true # istio のサイドカーをデプロイするかどうか
+
+  labels:
+  annotations:
+
+  max_replicas: 10 # 最大 Pod 数
+  min_replicas: 4 # 最小 Pod 数
+  replicas: 4 # 初期 Pod 数
+  max_surge: 25% # Rolling Update 時に追加で起動する Pod 数
+  max_unavailable: 1 # Rolling Update 時に停止する Pod 数
+
+  cpu_limit: "200m" # CPU 上限 1000m は 1 秒間 1 コアを占有することを意味する
+  memory_limit: "512Mi" # メモリ上限
+  cpu_request: "100m" # CPU 確保量 1000m は 1 秒間 1 コアを占有することを意味する
+  memory_request: "128Mi" # メモリ確保量
+
+  # スケールの閾値となるCPU使用率
+  # 実際の使用量を `cpu_request` で確保したCPUで割った値が参照される
+  cpu_threshold: 80
+
+  hosts: # クラスタ外部からリクエストを受け付けるホスト名
+    - keel-application-template.k8s.nxin.jp
+
+  # istio 経由でクラスタ外に公開するか否か
+  # あらかじめ host を istio-ingressgateway 用の LoadBalancer を CNAME として名前解決できるようにしておく必要がある
+  # クラスタ外からのトラフィックにおいて istio の機能を利用したい場合はこちらを有効にする
+  istio_exposed: true
+
+  # 追加で設定するルーティングルール
+  # 与えたルールはIstioのVirtualServiceに追加される cf. https://istio.io/latest/docs/reference/config/networking/virtual-service/
+  # ルーティングルールは上に行くほど優先度が高く、追加されたルールはデフォルトのルーティングルールの上に挿入される
+  additional_rules:
+    - match: # このルールは/healthと/metricsに対しての外部からのリクエストを404で返す
+        - uri:
+            exact: /health
+        - uri:
+            exact: /metrics
+      fault:
+        abort:
+          httpStatus: 404
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: WRITE_HOST_HERE
+            port:
+              number: 80
+
+  destinations: # リクエストすることを許可する接続先の情報
+
+  max_connections: 1000 # リクエストを遮断するバックエンドへの最大同時TCPコネクション数 この行を削除することで無効化
+  max_requests: 10000 # リクエストを遮断するバックエンドへの最大同時リクエスト数 この行を削除することで無効化
+  tcp_connect_timeout: 3s # TCP接続が確立するまでのタイムアウト期間 e.g. 10s, 1m, 1h
+  consecutive_gateway_errors: 50 # リクエストを遮断するバックエンドからの連続 502,503,504 レスポンス数 この行を削除することで無効化
+  sleep_window: 10s # リクエスト遮断のための計測期間 e.g. 10s, 1m, 1h
+  max_ejection_percent: 50 # リクエストを遮断するホストの割合 envoy の healthy_panic_threshold(Default: 50) を超えるホストが遮断されている場合ランダムなホストにリクエストされる
+  base_ejection_time: 5s # リクエスト遮断時間 e.g. 10s, 1m, 1h
