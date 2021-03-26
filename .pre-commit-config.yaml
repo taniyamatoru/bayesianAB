@@ -15,8 +15,6 @@ repos:
         args: [--allow-multiple-documents]
       - id: check-json
         always_run: true
-      - id: check-added-large-files
-        always_run: true
 
   # cloud formation files
   # templatesディレクトリ配下を想定
