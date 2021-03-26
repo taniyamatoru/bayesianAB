@@ -1,3 +1,3 @@
-# beysian-ab
+# bayesian-ab
 
-![check](https://github.com/lifull/beysian-ab/workflows/check/badge.svg)
+![check](https://github.com/lifull/bayesian-ab/workflows/check/badge.svg)

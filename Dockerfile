@@ -47,5 +47,5 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 WORKDIR /app/src
 
-# ENTRYPOINT ["python", "-m", "beysian-ab"]
+# ENTRYPOINT ["python", "-m", "bayesian-ab"]
 # CMD ["arg1", "arg2"]

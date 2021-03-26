@@ -1,4 +1,4 @@
-from beysian_ab import __version__
+from bayesian_ab import __version__
 
 
 def test_version():
