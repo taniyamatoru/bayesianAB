@@ -48,10 +48,11 @@ class StatsMixin(Distribution):
     def rvs(self, size: int) -> np.ndarray:
         return self.d.rvs(size)
 
-    def get_fig(self, x_min: float, x_max: float, N=1000) -> go.Figure:
+    def get_fig(self, x_min: float, x_max: float, N=1000, title=None) -> go.Figure:
         xs = np.linspace(x_min, x_max, N)
         ps = self.pdf(xs)
-        return fig_1d(xs, ps, title=self.__class__.__name__)
+        t = self.__class__.__name__ if title is None else title
+        return fig_1d(xs, ps, title=t)
 
     def histogram(
         self,
@@ -83,10 +84,10 @@ class StudentT(StatsMixin):
 
 
 class Normal(StatsMixin):
-    def __init__(self, mu: float, sigma: float):
+    def __init__(self, mu: float, sigma2: float):
         self.mu = mu
-        self.sigma = sigma
-        self.d = stats.norm(loc=mu, scale=sigma)
+        self.sigma2 = sigma2
+        self.d = stats.norm(loc=mu, scale=np.sqrt(sigma2))
 
 
 class LogNormal(StatsMixin):
@@ -103,12 +104,20 @@ class InverseGamma(StatsMixin):
         self.d = stats.invgamma(alpha, scale=beta)
 
 
+class Beta(StatsMixin):
+    def __init__(self, alpha: float, beta: float):
+        self.alpha = alpha
+        self.beta = beta
+        self.d = stats.beta(a=alpha, b=beta)
+
+
 class NormalInverseGamma(Distribution):
     def __init__(self, mu, lam, alpha, beta):
         self.mu = mu
         self.lam = lam
         self.alpha = alpha
         self.beta = beta
+        self.px = StudentT(nu=2 * self.alpha, mu=self.mu, lam=self.beta / self.alpha * self.lam)
 
     @property
     def mean(self) -> tuple[np.float64, np.float64]:
@@ -127,7 +136,7 @@ class NormalInverseGamma(Distribution):
         return x, self.beta ** 2 / ((self.alpha - 1) ** 2 * (self.alpha - 2))
 
     def pdf(self, x: float, s2: float) -> float:
-        px = stats.norm.pdf(x, loc=self.mu, scale=1 / (self.lam * s2))
+        px = stats.norm.pdf(x, loc=self.mu, scale=np.sqrt(s2 / self.lam))
         ps2 = stats.invgamma.pdf(s2, a=self.alpha, scale=self.beta)
         return float(px * ps2)
 
@@ -137,7 +146,7 @@ class NormalInverseGamma(Distribution):
     def rvs(self, size: int) -> np.ndarray:
         @np.vectorize
         def normal_sampling(s2):
-            return stats.norm.rvs(size=1, loc=self.mu, scale=1 / (self.lam * s2))
+            return stats.norm.rvs(size=1, loc=self.mu, scale=np.sqrt(s2 / self.lam))
 
         s2s = stats.invgamma.rvs(size=size, a=self.alpha, scale=self.beta)
         xs = normal_sampling(s2s)
@@ -145,8 +154,7 @@ class NormalInverseGamma(Distribution):
 
     def get_fig_x(self, x_min: float, x_max: float, N=1000) -> go.Figure:
         xs = np.linspace(x_min, x_max, N)
-        t = StudentT(nu=2 * self.alpha, mu=self.mu, lam=self.beta / self.alpha * self.lam)
-        ps = t.pdf(xs)
+        ps = self.px.pdf(xs)
         return fig_1d(xs, ps, title=self.__class__.__name__)
 
     def histogram_x(
@@ -156,6 +164,6 @@ class NormalInverseGamma(Distribution):
         x_max: Optional[float] = None,
         size: Optional[float] = None,
     ) -> go.Figure:
-        xs = self.rvs(n)[:, 0]
-        title = f"Sample of {self.__class__.__name__}"
+        xs = self.px.rvs(n)
+        title = f"Sample of {self.__class__.__name__} marginal x"
         return histogram(xs, title=title, x_min=x_min, x_max=x_max, size=size, probability=True)
