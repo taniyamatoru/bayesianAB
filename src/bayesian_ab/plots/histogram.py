@@ -38,3 +38,26 @@ def histogram(
         # bargap=0.1,
     )
     return go.Figure(data=data, layout=layout)
+
+
+def histogramAB(
+    zN: np.ndarray,
+    zP: np.ndarray,
+    x_min: Optional[float] = None,
+    x_max: Optional[float] = None,
+    size: Optional[float] = None,
+) -> go.Figure:
+    length = len(zN) + len(zP)
+    xbins = dict(start=x_min, end=x_max, size=size)
+    data = [
+        go.Histogram(x=zN, xbins=xbins, name="Negative"),
+        go.Histogram(x=zP, xbins=xbins, name="Positive"),
+    ]
+
+    layout = go.Layout(
+        title=f"Bを採用した時Aを上回る可能性: {len(zP)/length*100:.1f}%",
+        xaxis=dict(title="Z(B - A)"),
+        yaxis=dict(title="count"),
+        bargap=0.1,
+    )
+    return go.Figure(data=data, layout=layout)
